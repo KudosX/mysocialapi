@@ -8,4 +8,7 @@ Rails.application.routes.draw do
 
   get 'static_pages/contact'
 
+  devise_for :users, :controllers => { :omniauth_callbacks => 'omniauth_callbacks' }
+  match '/auth/:provider/callback', to: 'sessions#create', via: [:get, :post]
+  match '/logout', to: 'sessions#destroy', via: [:get, :post]
 end
