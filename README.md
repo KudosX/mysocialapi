@@ -97,8 +97,8 @@ export TWITTER_SECRET="xxxxxxsecret_from_twitter_apixxxxxx"
 - create config/omniauth.rb file and add the following
 ```
 Rails.application.config.middleware.use OmniAuth::Builder do
-  provider :twitter, ENV['TWITTER_KEY'], ENV['TWITTER_SECRET'],
-  provider :facebook, ENV['FACEBOOK_ID'], ENV['FACEBOOK_SECRET'],
+  provider :twitter, ENV['TWITTER_KEY'], ENV['TWITTER_SECRET']
+  provider :facebook, ENV['FACEBOOK_ID'], ENV['FACEBOOK_SECRET']
   provider :linkedin, ENV['CONSUMER_KEY'], ENV['CONSUMER_SECRET']
 end 
 ```
@@ -138,6 +138,145 @@ devise_for :users, :controllers => { :omniauth_callbacks => 'omniauth_callbacks'
 match '/auth/:provider/callback', to: 'sessions#create', via: [:get, :post]
 match '/logout', to: 'sessions#destroy', via: [:get, :post]
 ```
+
+#### Step 11: managing session data
+- have your sessions_controller.rb look like this
+```
+class SessionsController < ApplicationController
+  def create
+    # Login the User here
+  end
+  def destroy
+    # Logout the User here
+  end
+get "/auth/:provider/callback" => "sessions#create"
+end
+```
+
+- have your application_controller.rb look like this
+```
+class ApplicationController < ActionController::Base
+  # Prevent CSRF attacks by raising an exception.
+  # For APIs, you may want to use :null_session instead.
+  protect_from_forgery with: :exception
+  before_action :authenticate_user!, :except => [:index, :about, :contact, :faq]
+  protected
+  def current_user
+    @current_user ||= User.find_by(id: session[:user_id])
+  end
+  def signed_in?
+    !!current_user
+  end
+  helper_method :current_user, :signed_in?
+  def current_user=(user)
+    @current_user = user
+    session[:user_id] = user.nil? ? nil : user.id
+  end
+end
+```
+
+#### Step 12: handle some edge cases in logging in such as
+1. user signing in with a different provider from previous login
+2. a user is logged in with a provider but they try to login with same provider again
+3. a user is logged in but they try to login with a different provider
+- need to grab authentication data given to us by provider which is stored in `request.env['omniauth.auth']`
+- then compare to whether we have this identity or create a new one
+- in case #3 above we are going to link their new request to their identity
+- have your sessions_controller.rb look like this
+```
+class SessionsController < ApplicationController
+  def create
+    auth = request.env['omniauth.auth']
+    # Find an identity here
+    @identity = Identity.find_with_omniauth(auth)
+    if @identity.nil?
+      # If no identity was found, create a brand new one here
+      @identity = Identity.create_with_omniauth(auth)
+    end
+    if signed_in?
+      if @identity.user == current_user
+        # User is signed in so they are trying to link an identity with their
+        # account. But we found the identity and the user associated with it 
+        # is the current user. So the identity is already associated with 
+        # this user. So let's display an error message.
+        redirect_to root_url, notice: "Already linked that account!"
+      else
+        # The identity is not associated with the current_user so lets 
+        # associate the identity
+        @identity.user = current_user
+        @identity.save
+        redirect_to root_url, notice: "Successfully linked that account!"
+      end
+    else
+      if @identity.user.present?
+        # The identity we found had a user associated with it so let's 
+        # just log them in here
+        self.current_user = @identity.user
+        redirect_to root_url, notice: "Signed in!"
+      else
+        # No user associated with the identity so we need to create a new one
+        redirect_to new_user_url, notice: "Please finish registering"
+      end
+    end
+  end
+  def destroy
+    self.current_user = nil
+      redirect_to root_url, notice: "Signed out!"
+  end
+  get "/auth/:provider/callback" => "sessions#create"
+end
+```
+
+#### Step 13: setting up controller/omniauth_callbacks_controller.rb
+- code should look like the following for twitter provider
+```
+class OmniauthCallbacksController < Devise::OmniauthCallbacksController
+  def twitter
+    # You need to implement the method below in your model (e.g. app/models/user.rb)
+    @user = User.from_omniauth(request.env["omniauth.auth"])
+    if @user.persisted?
+      sign_in_and_redirect @user, :event => :authentication #this will throw if @user is not activated
+      set_flash_message(:notice, :success, :kind => "Twitter") if is_navigational_format?
+    else
+      session["devise.twitter_data"] = request.env["omniauth.auth"]
+      redirect_to new_user_registration_url
+    end
+  end
+  def failure
+    redirect_to root_path
+  end
+end
+```
+- all information retrieved from twitter by OmniAuth is available as a hash at `request.env["omniauth.auth"]`
+- more information here: https://github.com/intridea/omniauth/wiki/Auth-Hash-Schema
+- twitter hash info here: https://github.com/arunagw/omniauth-twitter#authentication-hash
+- when a valid user is found, they can be signed in with one of two Devise methods: `sign_in` 
+- or `sign_in_and_redirect`. Passing `:event => :authentication` is optional
+- more info here: https://stackoverflow.com/questions/9221390/what-does-event-authentication-do/13389324#13389324
+- in case user is not persisted, we store OmniAuth data in the session and redirect to registration
+
+#### Step 14: add method in models/user.rb
+```
+def self.from_omniauth(auth)
+  where(provider: auth.provider, uid: auth.uid).first_or_create do |user|
+    user.email = auth.info.email
+    user.password = Devise.friendly_token[0,20]
+    user.name = auth.info.name   # assuming the user model has a name
+    user.image = auth.info.image # assuming the user model has an image
+  end
+end
+```
+- this method tries to find an existing user by the provider and uid fields
+- if no user is found, a new one is created with a random password and some extra information
+- the `first_or_create` method automatically sets the provider and uid fields when creating new user
+- the one with a !, `first_or_create!` method operates similarly, except that i will raise an exception if user record fails validation
+- we are using the one without a !
+
+#### Step 15: Not Working
+
+
+#### Step xxx: add a migration
+- stop server, run `rails g migration add_user_to_identities user:references`
 
 
 
